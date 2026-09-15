@@ -86,3 +86,7 @@ Stage 1, the full MVP: `/create_listing` → photo+caption → Claude-drafted li
 ## Non-goals
 
 No database, no webhooks/ngrok, no multi-user support, no edit/cancel flow, no storefront publishing (the admin URL is the deliverable, not a live storefront listing), no tests/Docker/CI.
+
+## License
+
+All rights reserved. This repo is shared publicly to showcase my work — please don't copy, reuse, or redistribute the code without my permission.
