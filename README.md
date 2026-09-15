@@ -4,6 +4,8 @@ A Telegram bot that turns a product photo and a casual caption into a real Shopi
 
 Send a photo with a price and description as the caption → Claude drafts a title, description, and tags → you approve with one tap → a real, active product appears in your Shopify store.
 
+📹 [Full demo recording](https://github.com/asbhinder1996/ShoppieDoo/releases/tag/stage1-demo) — screen capture of the complete flow end to end.
+
 ![Telegram draft with Approve button](docs/Telegram%20Draft%20with%20Approve%20Button.png)
 
 ## Command flow
