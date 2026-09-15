@@ -4,8 +4,7 @@ A Telegram bot that turns a product photo and a casual caption into a real Shopi
 
 Send a photo with a price and description as the caption → Claude drafts a title, description, and tags → you approve with one tap → a real, active product appears in your Shopify store.
 
-![Telegram draft with Approve button](docs/telegram-draft.png)
-![Shopify admin product page](docs/shopify-product.png)
+![Telegram draft with Approve button](docs/Telegram%20Draft%20with%20Approve%20Button.png)
 
 ## Command flow
 
@@ -13,15 +12,27 @@ Send a photo with a price and description as the caption → Claude drafts a tit
 /create_listing
   -> "Send me a photo of your product, with the price and a short
       description as the caption."
+```
+![Create listing initiation step](docs/Create%20Listing%20Initiation%20Step.png)
 
+```
 [send a photo captioned "$35, hand-poured soy candle, lavender"]
   -> "Drafting your listing..."
-  -> Title / Price / Tags / Description / Image, with a ✅ Approve button
+```
+![User submission](docs/User%20Submission.png)
 
+```
+  -> Title / Price / Tags / Description / Image, with a ✅ Approve button
+```
+![Telegram draft with Approve button](docs/Telegram%20Draft%20with%20Approve%20Button.png)
+
+```
 [tap Approve]
   -> "Creating the product in Shopify..."
   -> "Product created: https://your-store.myshopify.com/admin/products/..."
 ```
+![Shopify admin product page](docs/Shopify%20Admin%20Product%20Page.png)
+![Customer facing product listing](docs/Customer%20facing%20Product%20Listing.png)
 
 ## Setup
 
