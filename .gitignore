@@ -5,3 +5,5 @@ __pycache__/
 .claude/
 My videos/
 HANDOFF.md
+bot.pid
+bot_run.log

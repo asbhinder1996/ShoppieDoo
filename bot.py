@@ -1,10 +1,11 @@
 """
-Telegram -> Claude -> Shopify product bot. Stage 1.
+Telegram -> Claude -> Shopify product bot. Stages 1-2.
 
 Polling mode: no server, no public URL. Telegram is asked "any new
 messages for me?" in a loop instead of Telegram calling us.
 """
 
+import asyncio
 import base64
 import json
 import logging
@@ -15,6 +16,7 @@ import uuid
 import httpx
 from anthropic import APIError, AsyncAnthropic
 from dotenv import load_dotenv
+from openai import AsyncOpenAI, OpenAIError
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
@@ -36,11 +38,19 @@ SHOPIFY_STORE_DOMAIN = os.environ["SHOPIFY_STORE_DOMAIN"]
 SHOPIFY_API_VERSION = os.environ["SHOPIFY_API_VERSION"]
 SHOPIFY_CLIENT_ID = os.environ["SHOPIFY_CLIENT_ID"]
 SHOPIFY_CLIENT_SECRET = os.environ["SHOPIFY_CLIENT_SECRET"]
+OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
+# Comma-separated Telegram user IDs allowed to use the bot. Every command
+# spends real money (Anthropic/OpenAI/Cloudinary calls, live Shopify
+# writes), so anyone who finds the bot must be explicitly allowlisted.
+ALLOWED_USER_IDS = {
+    int(uid) for uid in os.environ["ALLOWED_TELEGRAM_USER_IDS"].split(",") if uid.strip()
+}
 
 VENDOR = "ShoppieDoo"
 PRODUCT_TYPE = "General"
 
 anthropic_client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
 CLAUDE_SYSTEM_PROMPT = """\
 Return a single JSON object and nothing else. No preamble, no markdown \
@@ -69,7 +79,8 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 AWAITING_PHOTO: set[int] = set()
 # draft_id -> listing dict + image_url
 DRAFTS: dict[str, dict] = {}
-# telegram_user_id -> {product_id, admin_url, title, description, price, image_url}
+# telegram_user_id -> {product_id, admin_url, title, description, price,
+#   image_url, aesthetic_image_url (added by /create_photo)}
 LAST_PRODUCT: dict[int, dict] = {}
 
 _shopify_token: str | None = None
@@ -177,6 +188,75 @@ async def create_shopify_product(listing: dict) -> dict:
     return result["product"]
 
 
+async def attach_image_to_product(product_id: str, image_url: str, alt: str) -> None:
+    """Attach an already-hosted image to an existing product.
+
+    Uses productCreateMedia rather than productSet: we're only adding a
+    media item to a product that already exists, not redefining the whole
+    product, and this mutation doesn't require re-sending title/variants/
+    etc. Doesn't poll for READY status — attaching it is enough to
+    consider this done.
+    """
+    token = await get_shopify_token()
+    url = f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
+
+    mutation = """
+    mutation productCreateMedia($productId: ID!, $media: [CreateMediaInput!]!) {
+      productCreateMedia(productId: $productId, media: $media) {
+        media {
+          id
+        }
+        mediaUserErrors {
+          field
+          message
+        }
+      }
+    }
+    """
+    variables = {
+        "productId": product_id,
+        "media": [{
+            "originalSource": image_url,
+            "alt": alt,
+            "mediaContentType": "IMAGE",
+        }],
+    }
+
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            url,
+            json={"query": mutation, "variables": variables},
+            headers={"X-Shopify-Access-Token": token},
+            timeout=30,
+        )
+    response.raise_for_status()
+    body = response.json()
+
+    if "errors" in body:
+        raise RuntimeError(f"Shopify GraphQL error: {body['errors']}")
+
+    result = body["data"]["productCreateMedia"]
+    if result["mediaUserErrors"]:
+        raise RuntimeError(f"Shopify rejected the media: {result['mediaUserErrors']}")
+
+
+async def generate_aesthetic_image(image_bytes: bytes, product: dict) -> bytes:
+    """Ask gpt-image-1 for a styled lifestyle shot of the same product."""
+    prompt = (
+        f"A professional lifestyle product photo of this exact item: "
+        f"{product['title']}. Same product, unchanged — just a better "
+        f"setting, lighting, and styling suitable for an e-commerce listing."
+    )
+    result = await openai_client.images.edit(
+        model="gpt-image-1",
+        image=("product.jpg", image_bytes, "image/jpeg"),
+        prompt=prompt,
+        size="1024x1536",
+        input_fidelity="high",
+    )
+    return base64.b64decode(result.data[0].b64_json)
+
+
 async def upload_image(data: bytes, filename: str) -> str:
     """POST the bytes to Cloudinary, return secure_url."""
     url = f"https://api.cloudinary.com/v1_1/{CLOUDINARY_CLOUD_NAME}/image/upload"
@@ -247,7 +327,20 @@ async def draft_listing(image_bytes: bytes, caption: str) -> dict:
     raise RuntimeError(f"Claude didn't return valid JSON after 2 tries: {last_error}")
 
 
+async def reject_if_not_allowed(update: Update) -> bool:
+    """Return True (and reply) if this user isn't allowlisted."""
+    user_id = update.effective_user.id
+    if user_id in ALLOWED_USER_IDS:
+        return False
+    message = update.effective_message
+    if message is not None:
+        await message.reply_text("This bot is private. You're not authorized to use it.")
+    return True
+
+
 async def handle_create_listing(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await reject_if_not_allowed(update):
+        return
     user_id = update.effective_user.id
     AWAITING_PHOTO.add(user_id)
     await update.message.reply_text(
@@ -257,6 +350,8 @@ async def handle_create_listing(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await reject_if_not_allowed(update):
+        return
     user_id = update.effective_user.id
 
     if user_id not in AWAITING_PHOTO:
@@ -284,8 +379,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     try:
         listing = await draft_listing(data, caption)
-    except (RuntimeError, KeyError, APIError) as e:
-        await update.message.reply_text(f"Claude couldn't draft a listing: {e}")
+    except (RuntimeError, KeyError, APIError):
+        logging.exception("draft_listing failed")
+        await update.message.reply_text("Couldn't draft a listing. Please try again.")
         return
 
     draft_id = uuid.uuid4().hex[:8]
@@ -310,6 +406,9 @@ async def handle_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # the user's end forever.
     await query.answer()
 
+    if await reject_if_not_allowed(update):
+        return
+
     draft_id = query.data.split(":", 1)[1]
     draft = DRAFTS.get(draft_id)
     if draft is None:
@@ -320,8 +419,9 @@ async def handle_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     try:
         product = await create_shopify_product(draft)
-    except (RuntimeError, KeyError) as e:
-        await query.message.reply_text(f"Shopify couldn't create the product: {e}")
+    except (RuntimeError, KeyError):
+        logging.exception("create_shopify_product failed")
+        await query.message.reply_text("Couldn't create the product in Shopify. Please try again.")
         return
 
     product_numeric_id = product["id"].rsplit("/", 1)[-1]
@@ -340,17 +440,58 @@ async def handle_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await query.message.reply_text(f"Product created: {admin_url}")
 
 
+async def generate_and_attach(user_id: int, product: dict, chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        async with httpx.AsyncClient() as client:
+            source_resp = await client.get(product["image_url"], timeout=30)
+            source_resp.raise_for_status()
+            source_bytes = source_resp.content
+
+        aesthetic_bytes = await generate_aesthetic_image(source_bytes, product)
+        aesthetic_url = await upload_image(aesthetic_bytes, "aesthetic.jpg")
+        await attach_image_to_product(product["product_id"], aesthetic_url, product["title"])
+
+        product["aesthetic_image_url"] = aesthetic_url
+        LAST_PRODUCT[user_id] = product
+
+        # Sent as bytes, not the URL: URL-based photos cap at 5MB on
+        # Telegram's end, uploads allow 10MB, and we already have the bytes.
+        await context.bot.send_photo(chat_id=chat_id, photo=aesthetic_bytes)
+    except (httpx.HTTPError, OpenAIError, RuntimeError, KeyError):
+        logging.exception("create_photo failed")
+        await context.bot.send_message(chat_id=chat_id, text="Couldn't generate a photo. Please try again.")
+
+
+async def handle_create_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await reject_if_not_allowed(update):
+        return
+    user_id = update.effective_user.id
+    product = LAST_PRODUCT.get(user_id)
+    if product is None:
+        await update.message.reply_text("Create a product first with /create_listing.")
+        return
+
+    await update.message.reply_text(
+        f"Generating a photo for {product['title']}... about 30 seconds."
+    )
+    asyncio.create_task(
+        generate_and_attach(user_id, product, update.effective_chat.id, context)
+    )
+
+
 async def post_init(application: Application) -> None:
     # Registers the command so it shows up in Telegram's menu button
     # (the "/" icon next to the message box).
     await application.bot.set_my_commands([
         BotCommand("create_listing", "Create a new product listing"),
+        BotCommand("create_photo", "Generate a styled photo for your last product"),
     ])
 
 
 def main() -> None:
     app = Application.builder().token(TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("create_listing", handle_create_listing))
+    app.add_handler(CommandHandler("create_photo", handle_create_photo))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(CallbackQueryHandler(handle_approve))
     app.run_polling()

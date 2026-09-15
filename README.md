@@ -4,7 +4,7 @@ A Telegram bot that turns a product photo and a casual caption into a real Shopi
 
 Send a photo with a price and description as the caption → Claude drafts a title, description, and tags → you approve with one tap → a real, active product appears in your Shopify store.
 
-📹 [Full demo recording](https://github.com/asbhinder1996/ShoppieDoo/releases/tag/stage1-demo) — screen capture of the complete flow end to end.
+📹 [Full demo recording](https://github.com/asbhinder1996/ShoppieDoo/releases/tag/stage1-2-demo) — screen capture of the complete flow end to end, Stage 1 and Stage 2.
 
 ![Telegram draft with Approve button](docs/Telegram%20Draft%20with%20Approve%20Button.png)
 
@@ -65,6 +65,8 @@ Send a photo with a price and description as the caption → Claude drafts a tit
 | `SHOPIFY_API_VERSION` | A recent dated API version, e.g. `2026-07` |
 | `SHOPIFY_CLIENT_ID` / `SHOPIFY_CLIENT_SECRET` | Shopify admin → Settings → Apps and sales channels → Develop apps → your app → API credentials. This store's app issues client credentials rather than a static admin token, so the bot exchanges them for an access token at request time (`get_shopify_token()` in `bot.py`) instead of reading one static token from env. The app needs the `write_products` scope. |
 | `CLOUDINARY_CLOUD_NAME` / `CLOUDINARY_API_KEY` / `CLOUDINARY_API_SECRET` | [cloudinary.com/console](https://cloudinary.com/console) |
+| `OPENAI_API_KEY` | [platform.openai.com/api-keys](https://platform.openai.com/account/api-keys) |
+| `ALLOWED_TELEGRAM_USER_IDS` | Comma-separated Telegram user IDs allowed to use the bot — get yours from [@userinfobot](https://t.me/userinfobot). Every command spends real API/Shopify credits, so this is required; anyone not on the list is turned away. |
 
 ### Standalone test scripts
 
@@ -77,11 +79,13 @@ Both are safe to run and share output from — neither ever prints a secret valu
 
 ## What's built
 
-Stage 1, the full MVP: `/create_listing` → photo+caption → Claude-drafted listing → Approve button → real Shopify product via `productSet`, with the admin URL sent back. In-memory state only (`AWAITING_PHOTO`, `DRAFTS`, `LAST_PRODUCT`); a restart clears it.
+**Stage 1 — MVP.** `/create_listing` → photo+caption → Claude-drafted listing → Approve button → real Shopify product via `productSet`, with the admin URL sent back. In-memory state only (`AWAITING_PHOTO`, `DRAFTS`, `LAST_PRODUCT`); a restart clears it.
+
+**Stage 2 — `/create_photo`.** Reads the last created product, generates a styled lifestyle photo with `gpt-image-1` (`images.edit`, portrait `1024x1536`, `input_fidelity="high"` so the actual product is preserved), uploads it, and attaches it to the Shopify product.
+
+> **Usage note:** `/create_photo` has no approval step and no request queue — each run kicks off one background image-generation job (~30s) against a paid OpenAI endpoint. Wait for that run to finish (you'll get the photo, or an error, in the chat) before running it again on the same product. Firing it repeatedly back-to-back starts multiple overlapping jobs at once, which just burns extra API cost for no benefit — rerunning *after* a result comes back is how you regenerate the photo.
 
 ## What's designed but not built
-
-**Stage 2 — `/create_photo`.** Reads the last created product, generates a styled lifestyle photo with `gpt-image-1` (`images.edit`, portrait `1024x1536`, `input_fidelity="high"` so the actual product is preserved), uploads it, and attaches it to the Shopify product. No approval step — rerunning the command is the regenerate button.
 
 **Stage 3 — `/create_ad`, stretch goal.** Renders a 9:16 story-format video ad via Plainly's Designs API (`ecommerce-flair@v1`), with Claude generating five short on-screen strings (headline, mini-headline, two outro lines, a CTA) and the rest of the parameters pulled from the stored product. Polls `/api/v2/renders/{id}` every ~10s until done, then delivers the output video to Telegram.
 
