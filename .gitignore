@@ -1,0 +1,7 @@
+.env
+.env_old
+__pycache__/
+*.pyc
+.claude/
+My videos/
+HANDOFF.md
